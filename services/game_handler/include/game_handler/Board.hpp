@@ -9,9 +9,7 @@ namespace GameHandler {
     static const int32_t STRAIGHT_SIZE           = 5;
     static const int32_t FLUSH_SIZE              = 5;
     static const int32_t QUADS_SIZE              = 4;
-    static const int32_t FULL_SIZE               = 5;
     static const int32_t TRIPS_SIZE              = 3;
-    static const int32_t TWO_PAIR_SIZE           = 4;
     static const int32_t PAIR_SIZE               = 2;
     static const int32_t TOTAL_CARDS_SIZE        = BOARD_CARDS_NUMBER + HAND_CARDS_NUMBER;
 
@@ -21,11 +19,9 @@ namespace GameHandler {
         public:
             using board_t     = std::array<Card, BOARD_CARDS_NUMBER>;        // Flop + turn + river
             using flop_t      = std::array<Card, FLOP_CARDS_NUMBER>;         // Flop
-            using best_hand_t = std::array<Card, COMPARISON_CARDS_NUMBER>;   // 5 best cards of hand + board cards
             using all_cards_t = std::array<Card, TOTAL_CARDS_SIZE>;          // Hand + board cards
             using rank_f_t    = std::array<int32_t, RANK_CARDS_NUMBER + 1>;  // Ranks frequencies +1 for the ace
             using suit_f_t    = std::array<int32_t, SUIT_CARDS_NUMBER>;      // Suits frequencies
-            using combo_t     = std::vector<Card>;  // 2 cards for pair, 3 for trips, 4 for quads, 5 for flush, straight, full
 
             Board()                   = default;
             Board(const Board& other) = default;
@@ -99,12 +95,7 @@ namespace GameHandler {
             auto _hasQuads() -> bool;
 
             auto _updateStats() -> void;
-            auto _extractComboFromPairsLike(const all_cards_t& cards, HandRank rank, rank_f_t& rankFrequencies) -> combo_t;
-            auto _extractComboFromStraightOrFlush(const all_cards_t& cards, HandRank rank, rank_f_t& rankF, suit_f_t& suitF)
-                -> combo_t;
-            auto _trimCombo(HandRank rank, combo_t& combo) -> void;
-            auto _extractCombo(const all_cards_t& cards, HandRank rank, rank_f_t& rankF, suit_f_t& suitF) -> combo_t;
-            auto _extractHigherCards(all_cards_t& cards, HandRank rank, const combo_t& combo) -> best_hand_t;
-            auto _getHandRankAndBestCombo(const Hand& value) -> std::pair<HandRank, best_hand_t>;
+
+            [[nodiscard]] auto _combineWithHand(const Hand& hand) const -> all_cards_t;
     };
 }  // namespace GameHandler

@@ -402,6 +402,44 @@ TEST(BoardTest, HandsComparisonShouldBeCorrect) {
 
 /**
  ╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+ ║                                        Best five cards selection regressions                                        ║
+ ╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+ The four deals below all used to pick the wrong winner: the best five cards were the first five met while iterating
+ the board then the hole cards, not the five best ranked ones. Found by brute forcing the Rust port against an
+ independent C(7,5) evaluator, roughly one deal in 450 was decided wrongly.
+ */
+
+TEST(BoardTest, flushShouldKeepItsHighestCards) {
+    Board board({card("7H"), card("TH"), card("KC"), card("JH"), card("QH")});
+
+    // A-Q-J-T-7 flush beats Q-J-T-8-7, the ace is a hole card and used to be truncated away
+    EXPECT_EQ(board.compareHands({card("6H"), card("AH")}, {card("4D"), card("8H")}), 1);
+}
+
+TEST(BoardTest, straightShouldNotBeEvictedByADuplicatedRank) {
+    Board board({card("9C"), card("4H"), card("JH"), card("QH"), card("TS")});
+
+    // Both play the same Q-J-T-9-8 straight, the duplicated ten used to take the eight's slot
+    EXPECT_EQ(board.compareHands({card("TD"), card("8S")}, {card("8D"), card("QC")}), 0);
+}
+
+TEST(BoardTest, fullHouseShouldCompareItsTripsFirst) {
+    Board board({card("AD"), card("7S"), card("KD"), card("AC"), card("7H")});
+
+    // Kings full of aces loses to aces full of sevens
+    EXPECT_EQ(board.compareHands({card("KS"), card("KC")}, {card("AH"), card("4S")}), -1);
+}
+
+TEST(BoardTest, straightFlushShouldIgnoreHigherMixedSuitsStraights) {
+    Board board({card("5H"), card("6H"), card("7H"), card("8H"), card("9H")});
+
+    // Both play the board's nine high straight flush, the off suit ten used to point the run one rank too high
+    EXPECT_EQ(board.compareHands({card("TS"), card("2C")}, {card("4H"), card("2D")}), 0);
+}
+
+/**
+ ╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
  ║                                              JSON representation check                                              ║
  ╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
  */
