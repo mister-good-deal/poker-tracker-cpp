@@ -115,8 +115,7 @@ namespace GameHandler {
         // A raise is made to a total street bet, anything below the player's own street bet would take chips back out
         // of the pot and let the next calls invent chips
         if (amount <= player.totalStreetBet) {
-            throw std::invalid_argument(format("Player {} cannot raise to {}, its street bet is already {}", playerNum, amount,
-                                               player.totalStreetBet));
+            throw std::invalid_argument(format("Player {} cannot raise to {} under its own street bet", playerNum, amount));
         }
 
         _setAction(playerNum, RAISE, amount - player.totalStreetBet);
