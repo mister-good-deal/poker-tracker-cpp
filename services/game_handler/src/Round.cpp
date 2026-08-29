@@ -20,8 +20,12 @@ namespace GameHandler {
 
     namespace {
         auto playerIsInRound   = [](const PlayerStatus& player) { return player.inRound; };
-        auto playerIsAllIn     = [](const PlayerStatus& player) { return player.isAllIn; };
+        auto playerIsAllIn     = [](const PlayerStatus& player) { return player.inRound && player.isAllIn; };
         auto playerIsNotBusted = [](const PlayerStatus& player) { return !player.isEliminated(); };
+        // Seat order starting left of the button: small blind, big blind then the dealer
+        auto buttonOrder = [](const PlayerStatus& player) {
+            return player.position == DEALER ? 3 : static_cast<int32_t>(player.position);
+        };
     }  // namespace
 
     Round::Round(const Blinds& blinds, std::array<Player, 3>& players, Hand hand, int32_t dealerNumber)
@@ -106,10 +110,16 @@ namespace GameHandler {
     auto Round::bet(int32_t playerNum, int32_t amount) -> void { _setAction(playerNum, BET, amount); }
 
     auto Round::raiseTo(int32_t playerNum, int32_t amount) -> void {
-        auto& player         = _getPlayerStatus(playerNum);
-        auto  computedAmount = amount - player.totalStreetBet;
+        auto& player = _getPlayerStatus(playerNum);
 
-        _setAction(playerNum, RAISE, computedAmount);
+        // A raise is made to a total street bet, anything below the player's own street bet would take chips back out
+        // of the pot and let the next calls invent chips
+        if (amount <= player.totalStreetBet) {
+            throw std::invalid_argument(format("Player {} cannot raise to {}, its street bet is already {}", playerNum, amount,
+                                               player.totalStreetBet));
+        }
+
+        _setAction(playerNum, RAISE, amount - player.totalStreetBet);
     }
 
     auto Round::check(int32_t playerNum) -> void { _setAction(playerNum, CHECK); }
@@ -310,6 +320,7 @@ namespace GameHandler {
     auto Round::_endStreet() -> void {
         _updatePlayersMaxWinnable();
 
+        // An all-in player that folded is out of the round, counting it would make the difference below lie
         auto playersInRound = count_if(*_playersStatus, playerIsInRound);
         auto playersAllIn   = count_if(*_playersStatus, playerIsAllIn);
 
@@ -396,9 +407,14 @@ namespace GameHandler {
         // Add pot to winner(s) stack
         while (!ranking.empty()) {
             auto playersNum = ranking.top();
-            // Sort players by original stacks asc and pay players by this order
+            // Pay the smallest max winnable first so that a capped share flows back to the other winners. At equal max
+            // winnable pay in reverse seat order: the integer division leaves the odd chips to the last players paid,
+            // and those must be the earliest seats left of the button, not the biggest stack.
             sort(playersNum, [&](int32_t p1Num, int32_t p2Num) {
-                return _getPlayerStatus(p1Num).getStack() < _getPlayerStatus(p2Num).getStack();
+                const auto& p1 = _getPlayerStatus(p1Num);
+                const auto& p2 = _getPlayerStatus(p2Num);
+
+                return p1.maxWinnable != p2.maxWinnable ? p1.maxWinnable < p2.maxWinnable : buttonOrder(p1) > buttonOrder(p2);
             });
             // Number of remaining players to share the pot
             auto remainingPlayers = static_cast<int32_t>(playersNum.size());
