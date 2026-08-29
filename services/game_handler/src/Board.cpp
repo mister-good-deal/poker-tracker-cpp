@@ -18,6 +18,185 @@ namespace GameHandler {
     using enum Card::Suit;
     using enum HandRank;
 
+    namespace {
+        using eval_key_t = std::array<Card::Rank, COMPARISON_CARDS_NUMBER>;
+        using counts_t   = std::array<int32_t, RANK_CARDS_NUMBER + 1>;  // Ranks occurrences, indexed by Card::Rank
+        using present_t  = std::array<bool, RANK_CARDS_NUMBER + 1>;     // Ranks presence, index 0 is the low ace of the wheel
+
+        auto toRank(int32_t value) -> Card::Rank { return static_cast<Card::Rank>(value); }
+
+        auto rankCounts(const Board::all_cards_t& cards) -> counts_t {
+            counts_t counts {};
+
+            for (const auto& card : cards) {
+                if (card.getRank() != UNDEFINED) { counts.at(card.getRank())++; }
+            }
+
+            return counts;
+        }
+
+        // The suit, if any, present at least five times
+        auto flushSuit(const Board::all_cards_t& cards) -> Card::Suit {
+            std::array<int32_t, SUIT_CARDS_NUMBER> suitCounts {};
+
+            for (const auto& card : cards) {
+                if (card.getSuit() != Card::Suit::UNKNOWN) { suitCounts.at(card.getSuit())++; }
+            }
+
+            auto suit = find_if(suitCounts, [](int32_t occurrences) { return occurrences >= FLUSH_SIZE; });
+
+            return suit == suitCounts.end() ? Card::Suit::UNKNOWN : static_cast<Card::Suit>(distance(suitCounts.begin(), suit));
+        }
+
+        // Top rank of the highest straight described by `present`, wheel included, UNDEFINED if there is none
+        auto highestStraightTop(const present_t& present) -> Card::Rank {
+            present_t ranks = present;
+
+            // Special Ace case, the ace also plays low in the wheel
+            ranks[0] = present[ACE];
+
+            for (int32_t start = RANK_CARDS_NUMBER + 1 - STRAIGHT_SIZE; start >= 0; --start) {
+                auto window = counted(ranks.begin() + start, STRAIGHT_SIZE);
+
+                if (all_of(window, [](bool rankIsPresent) { return rankIsPresent; })) { return toRank(start + STRAIGHT_SIZE - 1); }
+            }
+
+            return UNDEFINED;
+        }
+
+        auto straightKey(Card::Rank top) -> eval_key_t {
+            // The wheel is keyed 5-4-3-2-2, it sorts below every other straight and ties only another wheel
+            auto bottom = top == FIVE ? TWO : toRank(top - STRAIGHT_SIZE + 1);
+
+            return {top, toRank(top - 1), toRank(top - 2), toRank(top - 3), bottom};
+        }
+
+        // Highest rank appearing exactly `occurrences` times, UNDEFINED if there is none
+        auto rankWithCount(const counts_t& counts, int32_t occurrences) -> Card::Rank {
+            for (int32_t rank = RANK_CARDS_NUMBER; rank >= TWO; --rank) {
+                if (counts.at(rank) == occurrences) { return toRank(rank); }
+            }
+
+            return UNDEFINED;
+        }
+
+        // The `index`th rank (0 based, from the highest) appearing at least twice, it splits the two pairs apart
+        auto nthPairRank(const counts_t& counts, int32_t index) -> Card::Rank {
+            for (int32_t rank = RANK_CARDS_NUMBER; rank >= TWO; --rank) {
+                if (counts.at(rank) >= PAIR_SIZE && index-- == 0) { return toRank(rank); }
+            }
+
+            return UNDEFINED;
+        }
+
+        auto highestPairExcluding(const counts_t& counts, Card::Rank excluded) -> Card::Rank {
+            for (int32_t rank = RANK_CARDS_NUMBER; rank >= TWO; --rank) {
+                if (counts.at(rank) >= PAIR_SIZE && toRank(rank) != excluded) { return toRank(rank); }
+            }
+
+            return UNDEFINED;
+        }
+
+        // Highest present rank that is not excluded, UNDEFINED if there is none (never happens on seven cards)
+        auto highestRankExcluding(const counts_t& counts, std::initializer_list<Card::Rank> excluded) -> Card::Rank {
+            for (int32_t rank = RANK_CARDS_NUMBER; rank >= TWO; --rank) {
+                if (counts.at(rank) >= 1 && find(excluded, toRank(rank)) == excluded.end()) { return toRank(rank); }
+            }
+
+            return UNDEFINED;
+        }
+
+        auto flushKey(const Board::all_cards_t& cards, Card::Suit suit) -> eval_key_t {
+            std::vector<Card::Rank> ranks;
+
+            for (const auto& card : cards) {
+                if (card.getSuit() == suit) { ranks.push_back(card.getRank()); }
+            }
+
+            sort(ranks, [](Card::Rank A, Card::Rank B) { return A > B; });
+
+            return {ranks[0], ranks[1], ranks[2], ranks[3], ranks[4]};
+        }
+
+        /**
+         * @brief Canonical seven cards evaluation: the hand rank plus its five tiebreak ranks, highest first.
+         *
+         * For high card, pair, two pair, trips, full and quads the key is the made cards then the kickers, for a
+         * straight or a straight flush the five ranks of the highest qualifying run and for a flush the five highest
+         * cards of the flushed suit. Two hands then compare as (HandRank, key) lexicographically, which is the whole of
+         * compareHands: there is no variable length combo truncated into a five cards array anymore, so the best five
+         * cards no longer depend on the order the board and the hole cards happen to be iterated in.
+         */
+        auto evaluate(const Board::all_cards_t& cards) -> std::pair<HandRank, eval_key_t> {
+            auto counts = rankCounts(cards);
+            auto suit   = flushSuit(cards);
+
+            if (suit != Card::Suit::UNKNOWN) {
+                present_t suited {};
+
+                for (const auto& card : cards) {
+                    if (card.getSuit() == suit && card.getRank() != UNDEFINED) { suited.at(card.getRank()) = true; }
+                }
+
+                // The straight flush run must be looked up among the flushed cards only, a higher mixed suits straight
+                // is not one
+                if (auto top = highestStraightTop(suited); top != UNDEFINED) { return {STRAIGHT_FLUSH, straightKey(top)}; }
+            }
+
+            if (auto quads = rankWithCount(counts, QUADS_SIZE); quads != UNDEFINED) {
+                return {QUADS, eval_key_t {quads, quads, quads, quads, highestRankExcluding(counts, {quads})}};
+            }
+
+            auto trips = rankWithCount(counts, TRIPS_SIZE);
+
+            if (trips != UNDEFINED) {
+                if (auto pair = highestPairExcluding(counts, trips); pair != UNDEFINED) {
+                    return {FULL, eval_key_t {trips, trips, trips, pair, pair}};
+                }
+            }
+
+            if (suit != Card::Suit::UNKNOWN) { return {FLUSH, flushKey(cards, suit)}; }
+
+            present_t present {};
+
+            for (int32_t rank = TWO; rank <= RANK_CARDS_NUMBER; ++rank) { present.at(rank) = counts.at(rank) >= 1; }
+
+            if (auto top = highestStraightTop(present); top != UNDEFINED) { return {STRAIGHT, straightKey(top)}; }
+
+            if (trips != UNDEFINED) {
+                auto first  = highestRankExcluding(counts, {trips});
+                auto second = highestRankExcluding(counts, {trips, first});
+
+                return {TRIPS, eval_key_t {trips, trips, trips, first, second}};
+            }
+
+            auto highPair = nthPairRank(counts, 0);
+            auto lowPair  = nthPairRank(counts, 1);
+
+            if (lowPair != UNDEFINED) {
+                auto kicker = highestRankExcluding(counts, {highPair, lowPair});
+
+                return {TWO_PAIR, eval_key_t {highPair, highPair, lowPair, lowPair, kicker}};
+            }
+
+            if (highPair != UNDEFINED) {
+                auto first  = highestRankExcluding(counts, {highPair});
+                auto second = highestRankExcluding(counts, {highPair, first});
+                auto third  = highestRankExcluding(counts, {highPair, first, second});
+
+                return {PAIR, eval_key_t {highPair, highPair, first, second, third}};
+            }
+
+            auto first  = highestRankExcluding(counts, {});
+            auto second = highestRankExcluding(counts, {first});
+            auto third  = highestRankExcluding(counts, {first, second});
+            auto fourth = highestRankExcluding(counts, {first, second, third});
+            auto fifth  = highestRankExcluding(counts, {first, second, third, fourth});
+
+            return {HIGH_CARD, eval_key_t {first, second, third, fourth, fifth}};
+        }
+    }  // namespace
+
     auto Board::operator=(Board&& other) noexcept -> Board& {
         if (this != &other) {
             _cards             = std::move(other._cards);
@@ -80,11 +259,7 @@ namespace GameHandler {
         auto     suitF    = _computeSuitFrequencies(hand);
         bool     straight = _straight || _countPossibleStraights(0, rankF) >= 1;
 
-        // Combine board cards with hand cards
-        all_cards_t cards;
-        copy(_cards, cards.begin());
-        const auto& handCards = hand.getCards();
-        copy(handCards, cards.begin() + BOARD_CARDS_NUMBER);
+        auto cards = _combineWithHand(hand);
 
         if (_pair || count(rankF, 2) == 1) { rank = PAIR; }
         if (_twoPair || count(rankF, 2) == 2) { rank = TWO_PAIR; }
@@ -103,22 +278,14 @@ namespace GameHandler {
         if (!hand1.isSet()) { return -1; }
         if (!hand2.isSet()) { return 1; }
 
-        auto hand1RankAndBestCombo = _getHandRankAndBestCombo(hand1);
-        auto hand2RankAndBestCombo = _getHandRankAndBestCombo(hand2);
+        auto [rank1, key1] = evaluate(_combineWithHand(hand1));
+        auto [rank2, key2] = evaluate(_combineWithHand(hand2));
 
-        HandRank rank1 = hand1RankAndBestCombo.first;
-        HandRank rank2 = hand2RankAndBestCombo.first;
+        if (rank1 != rank2) { return rank1 > rank2 ? 1 : -1; }
 
-        best_hand_t bestHand1 = hand1RankAndBestCombo.second;
-        best_hand_t bestHand2 = hand2RankAndBestCombo.second;
-
-        if (rank1 > rank2) { return 1; }
-        if (rank1 < rank2) { return -1; }
-
-        // Assuming that cards of the best hand are sorted by rank in descending order
-        for (int i = 0; i < COMPARISON_CARDS_NUMBER; ++i) {
-            if (bestHand1.at(i).getRank() > bestHand2.at(i).getRank()) { return 1; }
-            if (bestHand1.at(i).getRank() < bestHand2.at(i).getRank()) { return -1; }
+        // The tiebreak ranks are sorted in descending comparison order
+        for (int32_t i = 0; i < COMPARISON_CARDS_NUMBER; ++i) {
+            if (key1.at(i) != key2.at(i)) { return key1.at(i) > key2.at(i) ? 1 : -1; }
         }
 
         return 0;  // Both best hands are equal
@@ -287,170 +454,12 @@ namespace GameHandler {
         return false;
     }
 
-    auto Board::_extractComboFromStraightOrFlush(const all_cards_t& cards, HandRank rank, rank_f_t& rankF, suit_f_t& suitF)
-        -> combo_t {
-        std::vector<Card> combo;
-        int32_t           index               = STRAIGHT_SIZE;
-        auto              rankFrequenciesSize = static_cast<int32_t>(rankF.size());
-        Card::Suit        suit                = Card::Suit::UNKNOWN;
-
-        // Special Ace case
-        rankF[0] = rankF[ACE];
-
-        auto isRankEndIndex = [](const auto& window) {
-            return count_if(window, [](const auto& value) { return value >= 1; }) == STRAIGHT_SIZE;
-        };
-
-        auto flushSuitIndex = [](const suit_f_t& frequencies) {
-            return distance(frequencies.begin(), find_if(frequencies, [](int32_t val) { return val >= STRAIGHT_SIZE; }));
-        };
-
-        auto inStraightRange = [&](const Card& card, int32_t startRank) {
-            return card.getRank() >= startRank && card.getRank() <= startRank + STRAIGHT_SIZE;
-        };
-
-        auto window = counted(rankF.end() - index, STRAIGHT_SIZE);
-
-        switch (rank) {
-            case STRAIGHT:
-                while (!isRankEndIndex(window)) { window = counted(rankF.end() - ++index, STRAIGHT_SIZE); }
-
-                for (const auto& card : cards) {
-                    if (inStraightRange(card, rankFrequenciesSize - index)) { combo.push_back(card); }
-                }
-                break;
-            case FLUSH:
-                suit = static_cast<Card::Suit>(flushSuitIndex(suitF));
-
-                for (const auto& card : cards) {
-                    if (card.getSuit() == suit) { combo.push_back(card); }
-                }
-                break;
-            case STRAIGHT_FLUSH:
-                while (!isRankEndIndex(window)) { window = counted(rankF.end() - ++index, STRAIGHT_SIZE); }
-                suit = static_cast<Card::Suit>(flushSuitIndex(suitF));
-
-                for (const auto& card : cards) {
-                    if (inStraightRange(card, rankFrequenciesSize - index) && card.getSuit() == suit) { combo.push_back(card); }
-                }
-                break;
-            default: throw std::invalid_argument("The given hand rank is invalid");
-        }
-
-        return combo;
-    }
-
-    auto Board::_extractComboFromPairsLike(const all_cards_t& cards, HandRank rank, rank_f_t& rankFrequencies) -> combo_t {
-        combo_t combo;
-
-        auto extractCombo = [&](int value) {
-            for (const auto& card : cards) {
-                if (rankFrequencies[card.getRank()] == value) { combo.push_back(card); }
-            }
-        };
-
-        switch (rank) {
-            case HIGH_CARD: break;
-            case PAIR: extractCombo(PAIR_SIZE); break;
-            case TWO_PAIR:
-                extractCombo(PAIR_SIZE);
-                _trimCombo(TWO_PAIR, combo);
-                break;
-            case TRIPS:
-                extractCombo(TRIPS_SIZE);
-                _trimCombo(TRIPS, combo);
-                break;
-            case FULL:
-                extractCombo(TRIPS_SIZE);
-                extractCombo(PAIR_SIZE);
-                _trimCombo(FULL, combo);
-                break;
-            case QUADS: extractCombo(QUADS_SIZE); break;
-            default: throw std::invalid_argument("The given hand rank is invalid");
-        }
-
-        return combo;
-    }
-
-    auto Board::_trimCombo(HandRank rank, combo_t& combo) -> void {
-        // Order cards
-        sort(combo, [](const Card& A, const Card& B) { return A.getRank() > B.getRank(); });
-        // Trims the combo to the correct size
-        switch (rank) {
-            case TWO_PAIR: combo.erase(combo.begin() + TWO_PAIR_SIZE, combo.end()); break;
-            case TRIPS: combo.erase(combo.begin() + TRIPS_SIZE, combo.end()); break;
-            case FULL: combo.erase(combo.begin() + FULL_SIZE, combo.end()); break;
-            default: throw std::invalid_argument("The given hand rank is invalid");
-        }
-    }
-
-    auto Board::_extractCombo(const all_cards_t& cards, HandRank rank, rank_f_t& rankF, suit_f_t& suitF) -> combo_t {
-        switch (rank) {
-            case STRAIGHT:
-            case FLUSH:
-            case STRAIGHT_FLUSH: return _extractComboFromStraightOrFlush(cards, rank, rankF, suitF);
-            case HIGH_CARD:
-            case PAIR:
-            case TWO_PAIR:
-            case TRIPS:
-            case FULL:
-            case QUADS: return _extractComboFromPairsLike(cards, rank, rankF);
-            default: throw std::invalid_argument("The given hand rank is invalid");
-        }
-    }
-
-    // Find the highest cards that are not in the combo
-    auto Board::_extractHigherCards(all_cards_t& cards, HandRank rank, const combo_t& combo) -> best_hand_t {
-        best_hand_t higherCards;
-        auto        currentSize      = combo.size();
-        int         highestCardIndex = 0;
-
-        // Fill the higher cards array with the combo cards
-        copy(combo, higherCards.begin());
-        // Sort the all the cards by rank in descending order
-        sort(cards, [](const Card& A, const Card& B) { return A.getRank() > B.getRank(); });
-        // Sort the higher cards by rank in descending order for needed hand ranks
-        if (rank == TWO_PAIR || rank == STRAIGHT || rank == FLUSH || rank == FULL || rank == STRAIGHT_FLUSH) {
-            sort(higherCards, [](const Card& A, const Card& B) { return A.getRank() > B.getRank(); });
-            // Put trips cards in the first 3 positions
-            if (rank == FULL && count(combo, higherCards.front()) != TRIPS_SIZE) {
-                std::swap(higherCards[0], higherCards[4]);
-                std::swap(higherCards[1], higherCards[3]);
-            }
-        }
-        // Add additional higher rank cards to the higher cards array
-        while (currentSize < COMPARISON_CARDS_NUMBER) {
-            auto& highestCard = cards[highestCardIndex++];
-            // If the card is not in the combo, add it to the higher cards array
-            if (find(combo, highestCard) == combo.end()) { higherCards[currentSize++] = highestCard; }
-        }
-
-        return higherCards;
-    }
-
-    // Similar to getHandRank()
-    auto Board::_getHandRankAndBestCombo(const Hand& hand) -> std::pair<HandRank, best_hand_t> {
-        HandRank          rank            = HIGH_CARD;
-        std::vector<Card> combo           = {};
-        auto              rankFrequencies = _computeRankFrequencies(hand);
-        auto              suitFrequencies = _computeSuitFrequencies(hand);
-        bool              straight        = _countPossibleStraights(0, rankFrequencies) >= 1;
-
-        // Combine board cards with hand cards
+    auto Board::_combineWithHand(const Hand& hand) const -> all_cards_t {
         all_cards_t cards;
+
         copy(_cards, cards.begin());
         copy(hand.getCards(), cards.begin() + BOARD_CARDS_NUMBER);
 
-        // Determine the hand rank
-        if (count(rankFrequencies, 2) == 1) { rank = PAIR; }
-        if (count(rankFrequencies, 2) >= 2) { rank = TWO_PAIR; }
-        if (count(rankFrequencies, 3) == 1) { rank = TRIPS; }
-        if (straight) { rank = STRAIGHT; }
-        if (any_of(suitFrequencies, [](const auto& value) { return value >= FLUSH_SIZE; })) { rank = FLUSH; }
-        if (count(rankFrequencies, 3) == 2 || (count(rankFrequencies, 3) == 1 && count(rankFrequencies, 2) >= 1)) { rank = FULL; }
-        if (count(rankFrequencies, 4) == 1) { rank = QUADS; }
-        if (rank == FLUSH && straight && _isStraightFlush(cards, rankFrequencies, suitFrequencies)) { rank = STRAIGHT_FLUSH; }
-
-        return {rank, _extractHigherCards(cards, rank, _extractCombo(cards, rank, rankFrequencies, suitFrequencies))};
+        return cards;
     }
 }  // namespace GameHandler
